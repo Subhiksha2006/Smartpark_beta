@@ -4,24 +4,26 @@ export type ParsedHardwareEvent =
   | { type: "UNKNOWN"; raw: string };
 
 export function parseArduinoLine(line: string): ParsedHardwareEvent {
-  const clean = line.trim().toUpperCase();
+  const clean = line.trim().toUpperCase().replace(/[^A-Z0-9_:]/g, "");
 
-  if (clean === "A1_OCCUPIED") {
+  if (clean.includes("A1") && (clean.includes("OCCUPIED") || clean.includes("BUSY") || clean.includes("FULL"))) {
     return { type: "SLOT_CHANGE", slot: "A1", status: "occupied" };
   }
-  if (clean === "A1_FREE") {
+  if (clean.includes("A1") && (clean.includes("FREE") || clean.includes("AVAILABLE") || clean.includes("EMPTY"))) {
     return { type: "SLOT_CHANGE", slot: "A1", status: "available" };
   }
-  if (clean === "A2_OCCUPIED") {
+
+  if (clean.includes("A2") && (clean.includes("OCCUPIED") || clean.includes("BUSY") || clean.includes("FULL"))) {
     return { type: "SLOT_CHANGE", slot: "A2", status: "occupied" };
   }
-  if (clean === "A2_FREE") {
+  if (clean.includes("A2") && (clean.includes("FREE") || clean.includes("AVAILABLE") || clean.includes("EMPTY"))) {
     return { type: "SLOT_CHANGE", slot: "A2", status: "available" };
   }
-  if (clean === "GATE_OPENED") {
+
+  if (clean.includes("GATE_OPENED") || clean.includes("GATE_OPEN") || clean.includes("GATE:OPENED")) {
     return { type: "GATE_EVENT", gateState: "OPENED" };
   }
-  if (clean === "GATE_CLOSED") {
+  if (clean.includes("GATE_CLOSED") || clean.includes("GATE_CLOSE") || clean.includes("GATE:CLOSED")) {
     return { type: "GATE_EVENT", gateState: "CLOSED" };
   }
 

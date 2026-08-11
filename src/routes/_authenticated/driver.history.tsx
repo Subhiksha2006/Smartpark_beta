@@ -5,6 +5,7 @@ import { PortalShell } from "@/components/PortalShell";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useCurrentUser } from "@/lib/use-role";
+import { getDemoRole } from "@/lib/demo-auth";
 
 export const Route = createFileRoute("/_authenticated/driver/history")({
   component: () => (
@@ -21,19 +22,49 @@ const NAV = [
   { to: "/driver/profile", label: "Profile", icon: User },
 ];
 
+const MOCK_HISTORY = [
+  {
+    id: "hist-1",
+    booking_code: "BK-98421",
+    parking_slots: { code: "A1" },
+    vehicle_number: "TN01S1234",
+    duration_minutes: 45,
+    amount: 50,
+    payment_status: "paid",
+    created_at: new Date(Date.now() - 86400000).toISOString(),
+  },
+  {
+    id: "hist-2",
+    booking_code: "BK-87123",
+    parking_slots: { code: "B3" },
+    vehicle_number: "TN01S1234",
+    duration_minutes: 120,
+    amount: 100,
+    payment_status: "paid",
+    created_at: new Date(Date.now() - 172800000).toISOString(),
+  },
+];
+
 function DriverHistory() {
   const { userId } = useCurrentUser();
   const [rows, setRows] = useState<any[]>([]);
 
   useEffect(() => {
     if (!userId) return;
+    if (getDemoRole()) {
+      setRows(MOCK_HISTORY);
+      return;
+    }
     supabase
       .from("bookings")
       .select("*, parking_slots(code)")
       .eq("user_id", userId)
       .in("status", ["completed", "cancelled"])
       .order("created_at", { ascending: false })
-      .then(({ data }) => setRows(data ?? []));
+      .then(({ data, error }) => {
+        if (data && !error) setRows(data);
+        else setRows(MOCK_HISTORY);
+      });
   }, [userId]);
 
   return (

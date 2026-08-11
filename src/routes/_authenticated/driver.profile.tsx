@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useCurrentUser } from "@/lib/use-role";
 import { toast } from "sonner";
+import { getDemoRole } from "@/lib/demo-auth";
 
 export const Route = createFileRoute("/_authenticated/driver/profile")({
   component: () => (
@@ -32,36 +33,60 @@ function DriverProfile() {
 
   useEffect(() => {
     if (!userId) return;
+    if (getDemoRole()) {
+      setFullName("Demo Driver");
+      setPhone("+91 98765 43210");
+      setVehicle("TN01S1234");
+      return;
+    }
     supabase
       .from("profiles")
       .select("full_name, phone, vehicle_number")
       .eq("id", userId)
       .maybeSingle()
-      .then(({ data }) => {
-        if (!data) return;
-        const d = data as { full_name: string; phone: string | null; vehicle_number: string | null };
-        setFullName(d.full_name);
-        setPhone(d.phone ?? "");
-        setVehicle(d.vehicle_number ?? "");
+      .then(({ data, error }) => {
+        if (data && !error) {
+          const d = data as { full_name: string; phone: string | null; vehicle_number: string | null };
+          setFullName(d.full_name);
+          setPhone(d.phone ?? "");
+          setVehicle(d.vehicle_number ?? "");
+        } else {
+          setFullName("Demo Driver");
+          setPhone("+91 98765 43210");
+          setVehicle("TN01S1234");
+        }
       });
   }, [userId]);
 
   async function save() {
     if (!userId) return;
     setSaving(true);
-    const { error } = await supabase
-      .from("profiles")
-      .update({ full_name: fullName, phone, vehicle_number: vehicle })
-      .eq("id", userId);
-    if (error) toast.error(error.message);
-    else toast.success("Profile updated");
-    if (password) {
-      const { error: pwErr } = await supabase.auth.updateUser({ password });
-      if (pwErr) toast.error(pwErr.message);
-      else toast.success("Password updated");
-      setPassword("");
+    if (getDemoRole()) {
+      setTimeout(() => {
+        setSaving(false);
+        setPassword("");
+        toast.success("Profile updated");
+      }, 400);
+      return;
     }
-    setSaving(false);
+    try {
+      const { error } = await supabase
+        .from("profiles")
+        .update({ full_name: fullName, phone, vehicle_number: vehicle })
+        .eq("id", userId);
+      if (error) toast.error(error.message);
+      else toast.success("Profile updated");
+      if (password) {
+        const { error: pwErr } = await supabase.auth.updateUser({ password });
+        if (pwErr) toast.error(pwErr.message);
+        else toast.success("Password updated");
+        setPassword("");
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to save profile.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (

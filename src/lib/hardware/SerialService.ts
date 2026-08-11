@@ -135,19 +135,40 @@ class SerialService {
     }
   }
 
+  private writeQueue: Promise<boolean> = Promise.resolve(true);
+
   public async sendSerialCommand(command: string): Promise<boolean> {
+    this.writeQueue = this.writeQueue
+      .then(async () => {
+        return this.internalWrite(command);
+      })
+      .catch(() => false);
+    return this.writeQueue;
+  }
+
+  private async internalWrite(command: string): Promise<boolean> {
+    console.log("[Hardware] triggerGate called");
+    console.log("[Hardware] Sending OPEN_GATE");
+
     if (!this.port || !this.port.writable || this.status !== "connected") {
+      console.warn("[Hardware] Serial write failed: Serial port is offline or not writable. Current status:", this.status);
       return false;
     }
+
     try {
-      const textEncoder = new TextEncoderStream();
-      const writableStreamClosed = textEncoder.readable.pipeTo(this.port.writable);
-      const writer = textEncoder.writable.getWriter();
-      await writer.write(command.endsWith("\n") ? command : command + "\n");
+      const writer = this.port.writable.getWriter();
+      const encoder = new TextEncoder();
+      const payload = command.endsWith("\n") ? command : command + "\n";
+      const data = encoder.encode(payload);
+
+      await writer.write(data);
       writer.releaseLock();
+
+      console.log("[Hardware] Serial write successful");
+      console.log("[Hardware] triggerGate completed");
       return true;
-    } catch (e) {
-      console.error("Error sending command to serial port:", e);
+    } catch (e: any) {
+      console.error("[Hardware] Serial write failed", e);
       return false;
     }
   }

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Car } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { setDemoRole } from "@/lib/demo-auth";
 
 export const Route = createFileRoute("/auth")({
   head: () => ({ meta: [{ title: "Sign in — SmartPark" }] }),
@@ -55,22 +56,33 @@ function LoginForm() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      toast.error(error.message);
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      if (!data?.user) {
+        toast.error("Sign in succeeded, but no user session was returned.");
+        return;
+      }
+      // Ensure real Supabase authentication overrides any active demo role
+      setDemoRole(null);
+      const { data: roles } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", data.user.id)
+        .limit(1);
+      const role = (roles?.[0] as { role: string } | undefined)?.role;
+      toast.success("Welcome back!");
+      if (role === "admin") navigate({ to: "/admin/dashboard" });
+      else navigate({ to: "/driver/dashboard" });
+    } catch (err: any) {
+      console.error("Login error:", err);
+      toast.error(err?.message || "Failed to sign in. Please check your credentials and network connection.");
+    } finally {
       setLoading(false);
-      return;
     }
-    const { data } = await supabase.auth.getUser();
-    const { data: roles } = await supabase
-      .from("user_roles")
-      .select("role")
-      .eq("user_id", data.user!.id)
-      .limit(1);
-    const role = (roles?.[0] as { role: string } | undefined)?.role;
-    toast.success("Welcome back!");
-    if (role === "admin") navigate({ to: "/admin/dashboard" });
-    else navigate({ to: "/driver/dashboard" });
   }
 
   return (
@@ -88,6 +100,34 @@ function LoginForm() {
       >
         {loading ? "Signing in..." : "Sign in"}
       </button>
+
+      <div className="pt-2 text-center">
+        <p className="text-xs text-muted-foreground mb-2">Or explore directly with demo access:</p>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setDemoRole("driver");
+              toast.success("Signed in as Demo Driver");
+              navigate({ to: "/driver/dashboard" });
+            }}
+            className="flex-1 rounded-lg border border-border py-1.5 text-xs font-medium hover:bg-muted"
+          >
+            Demo Driver
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDemoRole("admin");
+              toast.success("Signed in as Demo Admin");
+              navigate({ to: "/admin/dashboard" });
+            }}
+            className="flex-1 rounded-lg border border-border py-1.5 text-xs font-medium hover:bg-muted"
+          >
+            Demo Admin
+          </button>
+        </div>
+      </div>
     </form>
   );
 }
@@ -112,25 +152,31 @@ function RegisterForm({ onDone }: { onDone: () => void }) {
       return;
     }
     setLoading(true);
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/`,
-        data: {
-          full_name: fullName,
-          vehicle_number: role === "driver" ? vehicle : null,
-          role,
+    try {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/`,
+          data: {
+            full_name: fullName,
+            vehicle_number: role === "driver" ? vehicle : null,
+            role,
+          },
         },
-      },
-    });
-    setLoading(false);
-    if (error) {
-      toast.error(error.message);
-      return;
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      toast.success("Account created! You can sign in now.");
+      onDone();
+    } catch (err: any) {
+      console.error("Registration error:", err);
+      toast.error(err?.message || "Failed to create account.");
+    } finally {
+      setLoading(false);
     }
-    toast.success("Account created! You can sign in now.");
-    onDone();
   }
 
   return (

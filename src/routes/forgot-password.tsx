@@ -15,12 +15,21 @@ function ForgotPassword() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/reset-password`,
-    });
-    setLoading(false);
-    if (error) return toast.error(error.message);
-    toast.success("If the email exists, a reset link has been sent.");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/reset-password`,
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      toast.success("If the email exists, a reset link has been sent.");
+    } catch (err: any) {
+      console.error("Reset error:", err);
+      toast.error(err?.message || "Failed to send reset link.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (

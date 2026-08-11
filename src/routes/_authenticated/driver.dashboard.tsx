@@ -3,11 +3,13 @@ import { LayoutDashboard, CalendarClock, History, User } from "lucide-react";
 import { RoleGuard } from "@/components/RoleGuard";
 import { PortalShell } from "@/components/PortalShell";
 import { SlotGrid, SlotLegend } from "@/components/SlotGrid";
+import { HardwareStatusCard } from "@/components/HardwareStatusCard";
 import { useSlots } from "@/lib/use-slots";
 import { useCurrentUser } from "@/lib/use-role";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { getDemoRole } from "@/lib/demo-auth";
 
 export const Route = createFileRoute("/_authenticated/driver/dashboard")({
   component: () => (
@@ -35,15 +37,23 @@ function DriverDashboard() {
 
   useEffect(() => {
     if (!userId) return;
+    if (getDemoRole()) {
+      setProfileName("Demo Driver");
+      setVehicle("TN01S1234");
+      return;
+    }
     supabase
       .from("profiles")
       .select("full_name, vehicle_number")
       .eq("id", userId)
       .maybeSingle()
-      .then(({ data }) => {
-        if (data) {
+      .then(({ data, error }) => {
+        if (data && !error) {
           setProfileName((data as { full_name: string }).full_name);
           setVehicle((data as { vehicle_number: string | null }).vehicle_number ?? "");
+        } else {
+          setProfileName("Demo Driver");
+          setVehicle("TN01S1234");
         }
       });
   }, [userId]);
@@ -60,22 +70,35 @@ function DriverDashboard() {
       return;
     }
     setBooking(true);
-    const { error } = await supabase.from("bookings").insert({
-      user_id: userId,
-      slot_id: selectedId,
-      vehicle_number: vehicle,
-      estimated_duration_hours: duration,
-      status: "reserved",
-    });
-    if (error) {
-      toast.error(error.message);
-      setBooking(false);
+    if (getDemoRole()) {
+      setTimeout(() => {
+        setBooking(false);
+        setSelectedId(null);
+        toast.success("Booking confirmed!");
+      }, 400);
       return;
     }
-    await supabase.from("parking_slots").update({ status: "reserved" }).eq("id", selectedId);
-    setBooking(false);
-    setSelectedId(null);
-    toast.success("Booking confirmed!");
+
+    try {
+      const { error } = await supabase.from("bookings").insert({
+        user_id: userId,
+        slot_id: selectedId,
+        vehicle_number: vehicle,
+        estimated_duration_hours: duration,
+        status: "reserved",
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await supabase.from("parking_slots").update({ status: "reserved" }).eq("id", selectedId);
+      setSelectedId(null);
+      toast.success("Booking confirmed!");
+    } catch (err: any) {
+      toast.error(err?.message || "Booking failed.");
+    } finally {
+      setBooking(false);
+    }
   }
 
   return (
@@ -85,6 +108,8 @@ function DriverDashboard() {
           <h2 className="text-2xl font-bold">Welcome{profileName ? `, ${profileName}` : ""}</h2>
           <p className="text-sm text-muted-foreground">Book a parking slot in real-time.</p>
         </div>
+
+        <HardwareStatusCard />
 
         <div className="grid gap-4 sm:grid-cols-3">
           <StatCard label="Available" value={counts.available} tone="emerald" />

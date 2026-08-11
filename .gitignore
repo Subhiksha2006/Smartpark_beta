@@ -32,3 +32,9 @@ dist-ssr
 *.sw?
 
 .env
+
+# Local Supabase CLI files
+supabase/.temp/
+
+# Windows files
+desktop.ini

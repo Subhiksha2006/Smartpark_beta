@@ -18,11 +18,20 @@ function ResetPassword() {
     e.preventDefault();
     if (password !== confirm) return toast.error("Passwords do not match");
     setLoading(true);
-    const { error } = await supabase.auth.updateUser({ password });
-    setLoading(false);
-    if (error) return toast.error(error.message);
-    toast.success("Password updated");
-    navigate({ to: "/auth" });
+    try {
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      toast.success("Password updated");
+      navigate({ to: "/auth" });
+    } catch (err: any) {
+      console.error("Password update error:", err);
+      toast.error(err?.message || "Failed to update password.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (

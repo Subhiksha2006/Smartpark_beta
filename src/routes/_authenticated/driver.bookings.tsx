@@ -26,6 +26,9 @@ import { toast } from "sonner";
 import { downloadInvoice } from "@/lib/invoice";
 import { triggerGate } from "@/lib/prototype-mode";
 import { hardwareLogger } from "@/lib/hardware/HardwareLogger";
+import { getDemoRole } from "@/lib/demo-auth";
+import { getDemoBookings } from "@/lib/demo-booking-store";
+import { HardwareStatusCard } from "@/components/HardwareStatusCard";
 
 export const Route = createFileRoute("/_authenticated/driver/bookings")({
   component: () => (
@@ -83,18 +86,52 @@ function DriverBookings() {
 
   async function load() {
     if (!userId) return;
-    const { data } = await supabase
-      .from("bookings")
-      .select("*, parking_slots(code)")
-      .eq("user_id", userId)
-      .in("status", ["reserved", "active", "completed"])
-      .order("created_at", { ascending: false })
-      .limit(10);
-    setBookings((data ?? []) as unknown as Booking[]);
+    if (getDemoRole()) {
+      const demoList = getDemoBookings();
+      setBookings(
+        demoList.map((d) => ({
+          id: d.id,
+          booking_code: d.booking_code,
+          slot_id: d.slot_id,
+          vehicle_number: d.vehicle_number,
+          status: d.status,
+          entry_time: d.entry_time,
+          exit_time: d.exit_time,
+          duration_minutes: d.duration_minutes,
+          amount: d.amount,
+          exit_requested: d.status === "active",
+          payment_status: d.payment_status,
+          created_at: d.created_at,
+          parking_slots: { code: d.slot_code },
+        })) as unknown as Booking[]
+      );
+      return;
+    }
+    try {
+      const { data } = await supabase
+        .from("bookings")
+        .select("*, parking_slots(code)")
+        .eq("user_id", userId)
+        .in("status", ["reserved", "active", "completed"])
+        .order("created_at", { ascending: false })
+        .limit(10);
+      setBookings((data ?? []) as unknown as Booking[]);
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   useEffect(() => {
     load();
+    if (getDemoRole()) {
+      const h = () => load();
+      window.addEventListener("smartpark:demo-bookings-update", h);
+      window.addEventListener("storage", h);
+      return () => {
+        window.removeEventListener("smartpark:demo-bookings-update", h);
+        window.removeEventListener("storage", h);
+      };
+    }
     const ch = supabase
       .channel("driver_bookings")
       .on("postgres_changes", { event: "*", schema: "public", table: "bookings" }, () => load())
@@ -121,7 +158,10 @@ function DriverBookings() {
   // =========================================================
   // ALLOW ENTRY (Real timestamp, DB update & Servo Gate)
   // =========================================================
+  // ALLOW ENTRY (Real timestamp, Active Status & Servo Gate)
+  // =========================================================
   async function allowEntry(b: Booking) {
+    if (busy) return;
     if (b.entry_time || b.status === "active" || b.status === "completed") {
       toast.info("Entry already allowed");
       return;
@@ -130,28 +170,41 @@ function DriverBookings() {
     const nowStr = new Date().toISOString();
 
     try {
-      // 1. Store actual current entry timestamp in database
-      const { error } = await supabase
-        .from("bookings")
-        .update({ status: "active", entry_time: nowStr })
-        .eq("id", b.id);
-
-      if (error) throw error;
-
-      // 2. Mark slot occupied
-      if (b.slot_id) {
-        await supabase.from("parking_slots").update({ status: "occupied" }).eq("id", b.slot_id);
+      if (!getDemoRole()) {
+        try {
+          await supabase.from("bookings").update({ status: "active", entry_time: nowStr }).eq("id", b.id);
+          if (b.slot_id) {
+            await supabase.from("parking_slots").update({ status: "occupied" }).eq("id", b.slot_id);
+          }
+        } catch (e) {
+          console.warn("Supabase entry update skipped/failed:", e);
+        }
       }
 
-      // 3. Trigger Hardware Gate (Sends OPEN_GATE over USB Serial to Arduino)
-      await triggerGate(b.booking_code, "ENTRY");
-      hardwareLogger.log("Gate Opened", `Allow Entry: ${b.booking_code}`);
+      // Update local slot status to occupied
+      if (typeof window !== "undefined" && b.parking_slots?.code) {
+        const slotCode = b.parking_slots.code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        window.dispatchEvent(
+          new CustomEvent("smartpark:slot-sensor", {
+            detail: { slotCode, status: "occupied" },
+          })
+        );
+      }
 
       setQrModal(null);
-      toast.success("Entry Allowed Successfully");
-      await load();
+      setBookings((prev) =>
+        prev.map((item) => (item.id === b.id ? { ...item, status: "active", entry_time: nowStr } : item))
+      );
+
+      // Non-blocking fire-and-forget gate actuation
+      triggerGate(b.booking_code, "ENTRY").catch((err) => {
+        console.warn("Gate entry serial warning:", err);
+      });
+
+      toast.success("Entry Allowed — Servo Gate Command Sent!");
     } catch (err: any) {
-      toast.error("Failed to process entry: " + (err?.message || "Error"));
+      console.error("Entry processing error:", err);
+      toast.error("Entry processing issue: " + (err?.message || "Failed"));
     } finally {
       setBusy(false);
     }
@@ -161,6 +214,7 @@ function DriverBookings() {
   // ALLOW EXIT (Real timestamp, Duration, Bill & Servo Gate)
   // =========================================================
   async function allowExit(b: Booking) {
+    if (busy) return;
     if (b.exit_time || b.status === "completed") {
       toast.info("Exit already allowed");
       return;
@@ -169,50 +223,82 @@ function DriverBookings() {
 
     const exitDate = new Date();
     const exitStr = exitDate.toISOString();
-    const entryDate = b.entry_time ? new Date(b.entry_time) : new Date(b.created_at);
+    const entryDate = b.entry_time ? new Date(b.entry_time) : (b.created_at ? new Date(b.created_at) : exitDate);
     const durationMinutes = Math.max(1, Math.round((exitDate.getTime() - entryDate.getTime()) / 60000));
     const pricing = calcAmount(durationMinutes);
 
     try {
-      // 1. Save exit_time, duration, amount, set status completed
-      const { error } = await supabase
-        .from("bookings")
-        .update({
-          status: "completed",
+      // 1. Update Database / Session (if not in demo mode)
+      if (!getDemoRole()) {
+        try {
+          await supabase
+            .from("bookings")
+            .update({
+              status: "completed",
+              exit_time: exitStr,
+              duration_minutes: durationMinutes,
+              amount: pricing.total,
+            })
+            .eq("id", b.id);
+          if (b.slot_id) {
+            await supabase.from("parking_slots").update({ status: "available" }).eq("id", b.slot_id);
+          }
+        } catch (e) {
+          console.warn("Supabase exit update skipped/failed:", e);
+        }
+      }
+
+      // 2. Update local slot state to available (Green)
+      if (typeof window !== "undefined" && b.parking_slots?.code) {
+        const slotCode = b.parking_slots.code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        window.dispatchEvent(
+          new CustomEvent("smartpark:slot-sensor", {
+            detail: { slotCode, status: "available" },
+          })
+        );
+      }
+
+      // 3. Generate itemized invoice HTML file safely
+      try {
+        downloadInvoice({
+          booking_code: b.booking_code,
+          vehicle_number: b.vehicle_number,
+          entry_time: entryDate.toISOString(),
           exit_time: exitStr,
           duration_minutes: durationMinutes,
           amount: pricing.total,
-        })
-        .eq("id", b.id);
-
-      if (error) throw error;
-
-      // 2. Free up slot
-      if (b.slot_id) {
-        await supabase.from("parking_slots").update({ status: "available" }).eq("id", b.slot_id);
+          payment_status: b.payment_status,
+          slot: b.parking_slots?.code,
+        });
+      } catch (invErr) {
+        console.error("Invoice download exception:", invErr);
       }
 
-      // 3. Trigger Hardware Gate
-      await triggerGate(b.booking_code, "EXIT");
-      hardwareLogger.log("Gate Opened", `Allow Exit: ${b.booking_code}`);
-
-      // 4. Auto-generate invoice
-      downloadInvoice({
-        booking_code: b.booking_code,
-        vehicle_number: b.vehicle_number,
-        entry_time: entryDate.toISOString(),
+      const completedBooking: Booking = {
+        ...b,
+        status: "completed",
         exit_time: exitStr,
         duration_minutes: durationMinutes,
         amount: pricing.total,
-        payment_status: b.payment_status,
-        slot: b.parking_slots?.code,
-      });
+      };
 
       setQrModal(null);
-      toast.success("Exit Allowed Successfully — Invoice Generated");
-      await load();
+      setBookings((prev) =>
+        prev.map((item) => (item.id === b.id ? completedBooking : item))
+      );
+
+      // Auto-open Pay Bill modal for the completed booking
+      setPayDialog(completedBooking);
+
+      // 4. Non-blocking fire-and-forget gate actuation (DO NOT await 5-second servo cycle)
+      triggerGate(b.booking_code, "EXIT").catch((err) => {
+        console.warn("Gate exit serial warning:", err);
+      });
+
+      toast.success(`Exit Allowed — Bill Generated (₹${pricing.total.toFixed(2)}) & Servo Command Sent!`);
     } catch (err: any) {
-      toast.error("Failed to process exit: " + (err?.message || "Error"));
+      console.error("Exit processing error:", err);
+      toast.error("Exit processing issue: " + (err?.message || "Failed"));
     } finally {
       setBusy(false);
     }
@@ -220,30 +306,27 @@ function DriverBookings() {
 
   async function payNow(b: Booking) {
     setBusy(true);
-    const { error } = await supabase
-      .from("bookings")
-      .update({ payment_status: "paid" })
-      .eq("id", b.id);
-    if (error) {
-      toast.error(error.message);
-      setBusy(false);
-      return;
+    if (!getDemoRole()) {
+      try {
+        await supabase.from("bookings").update({ payment_status: "paid" }).eq("id", b.id);
+      } catch (e) {}
     }
+    setBookings((prev) =>
+      prev.map((item) => (item.id === b.id ? { ...item, payment_status: "paid" } : item))
+    );
     toast.success(`Payment Completed via ${payMethod}`);
     setPayDialog(null);
     setBusy(false);
-    await load();
   }
 
   async function requestManualExit(b: Booking) {
-    const { error } = await supabase
-      .from("bookings")
-      .update({ exit_requested: true })
-      .eq("id", b.id);
-    if (error) return toast.error(error.message);
+    if (!getDemoRole()) {
+      try {
+        await supabase.from("bookings").update({ exit_requested: true }).eq("id", b.id);
+      } catch (e) {}
+    }
     toast.success("Exit requested — awaiting admin approval");
     setManualExit(null);
-    load();
   }
 
   async function copyId(code: string) {
@@ -260,6 +343,7 @@ function DriverBookings() {
   return (
     <PortalShell title="Driver Portal" nav={NAV}>
       <div className="space-y-4">
+        <HardwareStatusCard />
         <h2 className="text-2xl font-bold">My Bookings</h2>
         {bookings.length === 0 && (
           <div className="rounded-2xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">

@@ -3,6 +3,7 @@ import { LogOut, Menu, X, Car } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { setDemoRole } from "@/lib/demo-auth";
 
 export type NavItem = { to: string; label: string; icon: React.ComponentType<{ className?: string }> };
 
@@ -20,7 +21,10 @@ export function PortalShell({
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   async function logout() {
-    await supabase.auth.signOut();
+    setDemoRole(null);
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {}
     toast.success("Signed out");
     navigate({ to: "/auth" });
   }

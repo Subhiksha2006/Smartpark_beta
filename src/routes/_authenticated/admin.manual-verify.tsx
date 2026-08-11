@@ -7,7 +7,9 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { calcAmount } from "@/lib/pricing";
-import { triggerGate, usePrototypeMode } from "@/lib/prototype-mode";
+import { triggerGate, usePrototypeMode, getPrototypeMode } from "@/lib/prototype-mode";
+import { getDemoRole } from "@/lib/demo-auth";
+import { getDemoBookings, updateDemoBooking } from "@/lib/demo-booking-store";
 import { downloadInvoice } from "@/lib/invoice";
 import { hardwareLogger } from "@/lib/hardware/HardwareLogger";
 import { Search, DoorOpen, CheckCircle2, XCircle, Receipt, CreditCard } from "lucide-react";
@@ -37,6 +39,31 @@ function ManualVerify() {
   async function loadDefaults(currentMode: "entry" | "exit") {
     setBusy(true);
     const targetStatus = currentMode === "entry" ? "reserved" : "active";
+
+    if (getDemoRole() || getPrototypeMode()) {
+      const demoList = getDemoBookings();
+      const filtered = demoList
+        .filter((d) => d.status === targetStatus)
+        .map((d) => ({
+          id: d.id,
+          booking_code: d.booking_code,
+          slot_id: d.slot_id,
+          vehicle_number: d.vehicle_number,
+          status: d.status,
+          entry_time: d.entry_time,
+          exit_time: d.exit_time,
+          duration_minutes: d.duration_minutes,
+          amount: d.amount,
+          payment_status: d.payment_status,
+          created_at: d.created_at,
+          parking_slots: { code: d.slot_code },
+          profiles: { full_name: d.driver_name, phone: "+91 98765 43210" },
+        }));
+      setResults(filtered);
+      setBusy(false);
+      return;
+    }
+
     let query = supabase
       .from("bookings")
       .select("*, parking_slots(code), profiles!bookings_user_id_fkey(full_name, phone)")
@@ -55,6 +82,17 @@ function ManualVerify() {
   }, [mode]);
 
   useEffect(() => {
+    if (getDemoRole() || getPrototypeMode()) {
+      const h = () => {
+        if (!q.trim()) loadDefaults(mode);
+      };
+      window.addEventListener("smartpark:demo-bookings-update", h);
+      window.addEventListener("storage", h);
+      return () => {
+        window.removeEventListener("smartpark:demo-bookings-update", h);
+        window.removeEventListener("storage", h);
+      };
+    }
     const ch = supabase
       .channel("manual_verify")
       .on("postgres_changes", { event: "*", schema: "public", table: "bookings" }, () => {
@@ -73,7 +111,37 @@ function ManualVerify() {
       return;
     }
     setBusy(true);
-    const term = q.trim();
+    const term = q.trim().toUpperCase();
+
+    if (getDemoRole() || getPrototypeMode()) {
+      const demoList = getDemoBookings();
+      const filtered = demoList
+        .filter(
+          (d) =>
+            d.booking_code.toUpperCase().includes(term) ||
+            d.vehicle_number.toUpperCase().includes(term)
+        )
+        .map((d) => ({
+          id: d.id,
+          booking_code: d.booking_code,
+          slot_id: d.slot_id,
+          vehicle_number: d.vehicle_number,
+          status: d.status,
+          entry_time: d.entry_time,
+          exit_time: d.exit_time,
+          duration_minutes: d.duration_minutes,
+          amount: d.amount,
+          payment_status: d.payment_status,
+          created_at: d.created_at,
+          parking_slots: { code: d.slot_code },
+          profiles: { full_name: d.driver_name, phone: "+91 98765 43210" },
+        }));
+      setResults(filtered);
+      setBusy(false);
+      if (filtered.length === 0) toast.error("No matching bookings");
+      return;
+    }
+
     const { data } = await supabase
       .from("bookings")
       .select("*, parking_slots(code), profiles!bookings_user_id_fkey(full_name, phone)")
@@ -92,52 +160,111 @@ function ManualVerify() {
 
   async function allowEntry(b: any) {
     const now = new Date().toISOString();
-    const { error } = await supabase
-      .from("bookings")
-      .update({ status: "active", entry_time: now })
-      .eq("id", b.id);
-    if (error) return toast.error(error.message);
-    await supabase.from("parking_slots").update({ status: "occupied" }).eq("id", b.slot_id);
-    const gate = await triggerGate(b.booking_code, "ENTRY");
+    if (getDemoRole() || getPrototypeMode() || b.id.startsWith("demo-")) {
+      updateDemoBooking(b.booking_code, { status: "active", entry_time: now });
+      triggerGate(b.booking_code, "ENTRY").catch(() => {});
+      hardwareLogger.log("Manual Entry Approved", `Booking: ${b.booking_code}`);
+      toast.success("Vehicle Entry Approved Successfully.");
+      refresh();
+      return;
+    }
+
+    try {
+      await supabase
+        .from("bookings")
+        .update({ status: "active", entry_time: now })
+        .eq("id", b.id);
+      if (b.slot_id) {
+        await supabase.from("parking_slots").update({ status: "occupied" }).eq("id", b.slot_id);
+      }
+    } catch (e) {
+      console.warn("DB update skipped/failed:", e);
+    }
+
+    triggerGate(b.booking_code, "ENTRY").catch(() => {});
     hardwareLogger.log("Manual Entry Approved", `Booking: ${b.booking_code}`);
     toast.success("Vehicle Entry Approved Successfully.");
-    if (gate.simulated) toast("Gate Opened Successfully (Prototype Mode)");
     refresh();
   }
 
   async function processExit(b: any) {
-    const entry = b.entry_time ? new Date(b.entry_time) : new Date();
+    const entry = b.entry_time ? new Date(b.entry_time) : (b.created_at ? new Date(b.created_at) : new Date());
     const exit = new Date();
     const minutes = Math.max(1, Math.round((exit.getTime() - entry.getTime()) / 60000));
     const { total } = calcAmount(minutes);
-    const { error } = await supabase
-      .from("bookings")
-      .update({
+
+    if (getDemoRole() || getPrototypeMode() || b.id.startsWith("demo-")) {
+      updateDemoBooking(b.booking_code, {
         status: "completed",
         exit_time: exit.toISOString(),
         duration_minutes: minutes,
         amount: total,
-      })
-      .eq("id", b.id);
-    if (error) return toast.error(error.message);
-    await supabase.from("parking_slots").update({ status: "available" }).eq("id", b.slot_id);
-    const gate = await triggerGate(b.booking_code, "EXIT");
+        payment_status: "Paid",
+      });
+
+      triggerGate(b.booking_code, "EXIT").catch(() => {});
+      hardwareLogger.log("Manual Exit Approved", `Booking: ${b.booking_code}`);
+      toast.success(`Exit recorded · ₹${total}`);
+
+      try {
+        downloadInvoice({
+          booking_code: b.booking_code,
+          vehicle_number: b.vehicle_number,
+          entry_time: entry.toISOString(),
+          exit_time: exit.toISOString(),
+          duration_minutes: minutes,
+          amount: total,
+          payment_status: "Paid",
+          slot: b.parking_slots?.code || "A1",
+          driver_name: b.profiles?.full_name || "Demo Driver",
+        });
+      } catch (invErr) {
+        console.error("Invoice download exception:", invErr);
+      }
+      refresh();
+      return;
+    }
+
+    try {
+      await supabase
+        .from("bookings")
+        .update({
+          status: "completed",
+          exit_time: exit.toISOString(),
+          duration_minutes: minutes,
+          amount: total,
+        })
+        .eq("id", b.id);
+      if (b.slot_id) {
+        await supabase.from("parking_slots").update({ status: "available" }).eq("id", b.slot_id);
+      }
+    } catch (e) {
+      console.warn("DB update skipped/failed:", e);
+    }
+
+    // Fire-and-forget hardware gate call
+    triggerGate(b.booking_code, "EXIT").catch(() => {});
     hardwareLogger.log("Manual Exit Approved", `Booking: ${b.booking_code}`);
     toast.success(`Exit recorded · ₹${total}`);
-    if (gate.simulated) toast("Gate Opened Successfully (Prototype Mode)");
-    // Auto-generate invoice upon Exit Approval
-    downloadInvoice({
-      booking_code: b.booking_code,
-      vehicle_number: b.vehicle_number,
-      entry_time: b.entry_time,
-      exit_time: exit.toISOString(),
-      duration_minutes: minutes,
-      amount: total,
-      payment_status: b.payment_status,
-      slot: b.parking_slots?.code,
-      driver_name: b.profiles?.full_name,
-    });
-    hardwareLogger.log("Invoice Generated", `Booking: ${b.booking_code}`);
+
+    // Auto-generate invoice safely
+    try {
+      downloadInvoice({
+        booking_code: b.booking_code,
+        vehicle_number: b.vehicle_number,
+        entry_time: entry.toISOString(),
+        exit_time: exit.toISOString(),
+        duration_minutes: minutes,
+        amount: total,
+        payment_status: b.payment_status,
+        slot: b.parking_slots?.code,
+        driver_name: b.profiles?.full_name,
+      });
+      hardwareLogger.log("Invoice Generated", `Booking: ${b.booking_code}`);
+    } catch (invErr) {
+      console.error("Invoice download exception:", invErr);
+    }
+
     // Open payment simulator
     const fresh = { ...b, exit_time: exit.toISOString(), duration_minutes: minutes, amount: total, status: "completed" };
     setPayMethod("cash");

@@ -1,18 +1,27 @@
 import { supabase } from "@/integrations/supabase/client";
 import { hardwareLogger } from "./HardwareLogger";
+import { toast } from "sonner";
 
 export async function handleSlotSensorUpdate(
   slotCode: "A1" | "A2",
   status: "occupied" | "available"
 ) {
   // 1. Log event
-  if (slotCode === "A1") {
-    hardwareLogger.log(status === "occupied" ? "Slot A1 Occupied" : "Slot A1 Free");
-  } else if (slotCode === "A2") {
-    hardwareLogger.log(status === "occupied" ? "Slot A2 Occupied" : "Slot A2 Free");
+  hardwareLogger.log(status === "occupied" ? `Slot ${slotCode} Occupied` : `Slot ${slotCode} Free`);
+
+  // 2. Broadcast event to React UI components (useSlots, dashboard cards)
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("smartpark:slot-sensor", {
+        detail: { slotCode, status },
+      })
+    );
   }
 
-  // 2. Query slot in database matching code "A1" or "A-1" (or "A2" / "A-2")
+  // 3. Surface toast message to user
+  toast.info(`Ultrasonic Sensor: Slot ${slotCode} is now ${status.toUpperCase()}`);
+
+  // 4. Update database if connected
   try {
     const { data: slots } = await supabase
       .from("parking_slots")
@@ -32,6 +41,6 @@ export async function handleSlotSensorUpdate(
         .eq("id", matched.id);
     }
   } catch (err) {
-    console.error(`Failed to update slot ${slotCode} status in database:`, err);
+    console.warn(`Database sync for ${slotCode} skipped/failed:`, err);
   }
 }

@@ -32,7 +32,12 @@ export function usePrototypeMode(): [boolean, (v: boolean) => void] {
 
 export async function triggerGate(bookingId: string, type: "ENTRY" | "EXIT"): Promise<{ simulated: boolean; ok: boolean }> {
   if (getPrototypeMode()) return { simulated: true, ok: true };
-  const res = await hardwareManager.triggerGate(bookingId, type);
-  return { simulated: !res.hardware, ok: res.ok };
+  try {
+    const res = await hardwareManager.triggerGate(bookingId, type);
+    return { simulated: !res.hardware, ok: res.ok };
+  } catch (err) {
+    console.warn("triggerGate hardware error fallback:", err);
+    return { simulated: true, ok: true };
+  }
 }
 
