@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   Clock,
   ShieldCheck,
+  XCircle,
 } from "lucide-react";
 import { RoleGuard } from "@/components/RoleGuard";
 import { PortalShell } from "@/components/PortalShell";
@@ -25,9 +26,13 @@ import { calcAmount } from "@/lib/pricing";
 import { toast } from "sonner";
 import { downloadInvoice } from "@/lib/invoice";
 import { triggerGate } from "@/lib/prototype-mode";
-import { hardwareLogger } from "@/lib/hardware/HardwareLogger";
 import { getDemoRole } from "@/lib/demo-auth";
-import { getDemoBookings } from "@/lib/demo-booking-store";
+import {
+  useDemoState,
+  approveDemoEntry,
+  approveDemoExit,
+  cancelDemoBooking,
+} from "@/lib/demo-state-store";
 import { HardwareStatusCard } from "@/components/HardwareStatusCard";
 
 export const Route = createFileRoute("/_authenticated/driver/bookings")({
@@ -63,6 +68,7 @@ type Booking = {
 
 function DriverBookings() {
   const { userId } = useCurrentUser();
+  const { bookings: demoBookingsList } = useDemoState();
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [qrModal, setQrModal] = useState<{
     type: "ENTRY" | "EXIT";
@@ -72,8 +78,6 @@ function DriverBookings() {
   } | null>(null);
   const [payDialog, setPayDialog] = useState<Booking | null>(null);
   const [payMethod, setPayMethod] = useState<"Cash" | "UPI" | "Card">("UPI");
-  const [manualEntry, setManualEntry] = useState<Booking | null>(null);
-  const [manualExit, setManualExit] = useState<Booking | null>(null);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
@@ -87,9 +91,8 @@ function DriverBookings() {
   async function load() {
     if (!userId) return;
     if (getDemoRole()) {
-      const demoList = getDemoBookings();
       setBookings(
-        demoList.map((d) => ({
+        demoBookingsList.map((d) => ({
           id: d.id,
           booking_code: d.booking_code,
           slot_id: d.slot_id,
@@ -125,10 +128,10 @@ function DriverBookings() {
     load();
     if (getDemoRole()) {
       const h = () => load();
-      window.addEventListener("smartpark:demo-bookings-update", h);
+      window.addEventListener("smartpark:demo-state-update", h);
       window.addEventListener("storage", h);
       return () => {
-        window.removeEventListener("smartpark:demo-bookings-update", h);
+        window.removeEventListener("smartpark:demo-state-update", h);
         window.removeEventListener("storage", h);
       };
     }
@@ -140,12 +143,12 @@ function DriverBookings() {
       supabase.removeChannel(ch);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+  }, [userId, demoBookingsList]);
 
   async function makeQR(b: Booking, type: "ENTRY" | "EXIT") {
     const payload = JSON.stringify({
       bookingId: b.booking_code,
-      userId,
+      userId: userId || "demo-driver-id",
       slot: b.parking_slots?.code,
       vehicle: b.vehicle_number,
       timestamp: new Date().toISOString(),
@@ -156,8 +159,6 @@ function DriverBookings() {
   }
 
   // =========================================================
-  // ALLOW ENTRY (Real timestamp, DB update & Servo Gate)
-  // =========================================================
   // ALLOW ENTRY (Real timestamp, Active Status & Servo Gate)
   // =========================================================
   async function allowEntry(b: Booking) {
@@ -167,21 +168,22 @@ function DriverBookings() {
       return;
     }
     setBusy(true);
-    const nowStr = new Date().toISOString();
 
     try {
-      if (!getDemoRole()) {
-        try {
-          await supabase.from("bookings").update({ status: "active", entry_time: nowStr }).eq("id", b.id);
-          if (b.slot_id) {
-            await supabase.from("parking_slots").update({ status: "occupied" }).eq("id", b.slot_id);
-          }
-        } catch (e) {
-          console.warn("Supabase entry update skipped/failed:", e);
-        }
+      if (getDemoRole()) {
+        await approveDemoEntry(b.booking_code, "Demo Driver");
+        setQrModal(null);
+        toast.success("Entry Allowed — Servo Gate Command Sent!");
+        setBusy(false);
+        return;
       }
 
-      // Update local slot status to occupied
+      const nowStr = new Date().toISOString();
+      await supabase.from("bookings").update({ status: "active", entry_time: nowStr }).eq("id", b.id);
+      if (b.slot_id) {
+        await supabase.from("parking_slots").update({ status: "occupied" }).eq("id", b.slot_id);
+      }
+
       if (typeof window !== "undefined" && b.parking_slots?.code) {
         const slotCode = b.parking_slots.code.toUpperCase().replace(/[^A-Z0-9]/g, "");
         window.dispatchEvent(
@@ -196,15 +198,10 @@ function DriverBookings() {
         prev.map((item) => (item.id === b.id ? { ...item, status: "active", entry_time: nowStr } : item))
       );
 
-      // Non-blocking fire-and-forget gate actuation
-      triggerGate(b.booking_code, "ENTRY").catch((err) => {
-        console.warn("Gate entry serial warning:", err);
-      });
-
+      triggerGate(b.booking_code, "ENTRY").catch(() => {});
       toast.success("Entry Allowed — Servo Gate Command Sent!");
     } catch (err: any) {
-      console.error("Entry processing error:", err);
-      toast.error("Entry processing issue: " + (err?.message || "Failed"));
+      toast.error("Entry error: " + (err?.message || "Failed"));
     } finally {
       setBusy(false);
     }
@@ -221,34 +218,41 @@ function DriverBookings() {
     }
     setBusy(true);
 
-    const exitDate = new Date();
-    const exitStr = exitDate.toISOString();
-    const entryDate = b.entry_time ? new Date(b.entry_time) : (b.created_at ? new Date(b.created_at) : exitDate);
-    const durationMinutes = Math.max(1, Math.round((exitDate.getTime() - entryDate.getTime()) / 60000));
-    const pricing = calcAmount(durationMinutes);
-
     try {
-      // 1. Update Database / Session (if not in demo mode)
-      if (!getDemoRole()) {
-        try {
-          await supabase
-            .from("bookings")
-            .update({
-              status: "completed",
-              exit_time: exitStr,
-              duration_minutes: durationMinutes,
-              amount: pricing.total,
-            })
-            .eq("id", b.id);
-          if (b.slot_id) {
-            await supabase.from("parking_slots").update({ status: "available" }).eq("id", b.slot_id);
-          }
-        } catch (e) {
-          console.warn("Supabase exit update skipped/failed:", e);
-        }
+      if (getDemoRole()) {
+        const res = await approveDemoExit(b.booking_code, payMethod, "Demo Driver");
+        setQrModal(null);
+        setPayDialog({
+          ...b,
+          status: "completed",
+          duration_minutes: res.booking.duration_minutes,
+          amount: res.booking.amount,
+          payment_status: "paid",
+        });
+        toast.success(`Exit Allowed — Bill Generated (₹${res.fee.total.toFixed(2)}) & Servo Command Sent!`);
+        setBusy(false);
+        return;
       }
 
-      // 2. Update local slot state to available (Green)
+      const exitDate = new Date();
+      const exitStr = exitDate.toISOString();
+      const entryDate = b.entry_time ? new Date(b.entry_time) : (b.created_at ? new Date(b.created_at) : exitDate);
+      const durationMinutes = Math.max(1, Math.round((exitDate.getTime() - entryDate.getTime()) / 60000));
+      const pricing = calcAmount(durationMinutes);
+
+      await supabase
+        .from("bookings")
+        .update({
+          status: "completed",
+          exit_time: exitStr,
+          duration_minutes: durationMinutes,
+          amount: pricing.total,
+        })
+        .eq("id", b.id);
+      if (b.slot_id) {
+        await supabase.from("parking_slots").update({ status: "available" }).eq("id", b.slot_id);
+      }
+
       if (typeof window !== "undefined" && b.parking_slots?.code) {
         const slotCode = b.parking_slots.code.toUpperCase().replace(/[^A-Z0-9]/g, "");
         window.dispatchEvent(
@@ -258,7 +262,6 @@ function DriverBookings() {
         );
       }
 
-      // 3. Generate itemized invoice HTML file safely
       try {
         downloadInvoice({
           booking_code: b.booking_code,
@@ -270,9 +273,7 @@ function DriverBookings() {
           payment_status: b.payment_status,
           slot: b.parking_slots?.code,
         });
-      } catch (invErr) {
-        console.error("Invoice download exception:", invErr);
-      }
+      } catch {}
 
       const completedBooking: Booking = {
         ...b,
@@ -286,19 +287,34 @@ function DriverBookings() {
       setBookings((prev) =>
         prev.map((item) => (item.id === b.id ? completedBooking : item))
       );
-
-      // Auto-open Pay Bill modal for the completed booking
       setPayDialog(completedBooking);
 
-      // 4. Non-blocking fire-and-forget gate actuation (DO NOT await 5-second servo cycle)
-      triggerGate(b.booking_code, "EXIT").catch((err) => {
-        console.warn("Gate exit serial warning:", err);
-      });
-
+      triggerGate(b.booking_code, "EXIT").catch(() => {});
       toast.success(`Exit Allowed — Bill Generated (₹${pricing.total.toFixed(2)}) & Servo Command Sent!`);
     } catch (err: any) {
-      console.error("Exit processing error:", err);
-      toast.error("Exit processing issue: " + (err?.message || "Failed"));
+      toast.error("Exit error: " + (err?.message || "Failed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelReservation(b: Booking) {
+    if (!confirm(`Cancel reservation for ${b.booking_code}?`)) return;
+    setBusy(true);
+    try {
+      if (getDemoRole()) {
+        cancelDemoBooking(b.booking_code, "Demo Driver");
+        toast.success("Reservation cancelled. Slot is now available.");
+        setBusy(false);
+        return;
+      }
+      await supabase.from("bookings").update({ status: "cancelled" }).eq("id", b.id);
+      if (b.slot_id) {
+        await supabase.from("parking_slots").update({ status: "available" }).eq("id", b.slot_id);
+      }
+      toast.success("Reservation cancelled.");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to cancel.");
     } finally {
       setBusy(false);
     }
@@ -306,27 +322,21 @@ function DriverBookings() {
 
   async function payNow(b: Booking) {
     setBusy(true);
-    if (!getDemoRole()) {
-      try {
-        await supabase.from("bookings").update({ payment_status: "paid" }).eq("id", b.id);
-      } catch (e) {}
+    if (getDemoRole()) {
+      toast.success(`Payment Completed via ${payMethod}`);
+      setPayDialog(null);
+      setBusy(false);
+      return;
     }
+    try {
+      await supabase.from("bookings").update({ payment_status: "paid" }).eq("id", b.id);
+    } catch {}
     setBookings((prev) =>
       prev.map((item) => (item.id === b.id ? { ...item, payment_status: "paid" } : item))
     );
     toast.success(`Payment Completed via ${payMethod}`);
     setPayDialog(null);
     setBusy(false);
-  }
-
-  async function requestManualExit(b: Booking) {
-    if (!getDemoRole()) {
-      try {
-        await supabase.from("bookings").update({ exit_requested: true }).eq("id", b.id);
-      } catch (e) {}
-    }
-    toast.success("Exit requested — awaiting admin approval");
-    setManualExit(null);
   }
 
   async function copyId(code: string) {
@@ -446,44 +456,52 @@ function DriverBookings() {
                 )}
 
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {/* Before Entry: Show Entry QR */}
+                  {/* Before Entry: Show Entry QR & Allow Entry */}
                   {b.status === "reserved" && (
-                    <button
-                      onClick={() => makeQR(b, "ENTRY")}
-                      className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
-                    >
-                      <QrIcon className="h-4 w-4" /> Show Entry QR
-                    </button>
-                  )}
+                    <>
+                      <button
+                        onClick={() => makeQR(b, "ENTRY")}
+                        className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+                      >
+                        <QrIcon className="h-4 w-4" /> Show Entry QR
+                      </button>
 
-                  {b.status === "reserved" && (
-                    <button
-                      onClick={() => allowEntry(b)}
-                      disabled={busy}
-                      className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-                    >
-                      <ShieldCheck className="h-4 w-4" /> ALLOW ENTRY
-                    </button>
+                      <button
+                        onClick={() => allowEntry(b)}
+                        disabled={busy}
+                        className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                      >
+                        <ShieldCheck className="h-4 w-4" /> ALLOW ENTRY
+                      </button>
+
+                      <button
+                        onClick={() => cancelReservation(b)}
+                        disabled={busy}
+                        className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 text-destructive px-3 py-2 text-xs font-semibold hover:bg-destructive/10"
+                      >
+                        <XCircle className="h-4 w-4" /> Cancel Booking
+                      </button>
+                    </>
                   )}
 
                   {/* Active Parking: Show Exit QR & Allow Exit */}
                   {b.status === "active" && (
-                    <button
-                      onClick={() => makeQR(b, "EXIT")}
-                      className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700"
-                    >
-                      <QrIcon className="h-4 w-4" /> Show Exit QR
-                    </button>
-                  )}
+                    <>
+                      <button
+                        onClick={() => makeQR(b, "EXIT")}
+                        className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700"
+                      >
+                        <QrIcon className="h-4 w-4" /> Show Exit QR
+                      </button>
 
-                  {b.status === "active" && (
-                    <button
-                      onClick={() => allowExit(b)}
-                      disabled={busy}
-                      className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
-                    >
-                      <LogOut className="h-4 w-4" /> ALLOW EXIT
-                    </button>
+                      <button
+                        onClick={() => allowExit(b)}
+                        disabled={busy}
+                        className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+                      >
+                        <LogOut className="h-4 w-4" /> ALLOW EXIT
+                      </button>
+                    </>
                   )}
 
                   {/* Payment Button */}
@@ -539,7 +557,6 @@ function DriverBookings() {
             </p>
             <img src={qrModal.url} alt="QR" className="mx-auto rounded-lg border border-border p-2 bg-white" />
 
-            {/* Action buttons directly below QR code */}
             <div className="pt-2">
               {qrModal.type === "ENTRY" && (
                 <button
@@ -601,21 +618,13 @@ function DriverBookings() {
                 </button>
               ))}
             </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => payNow(payDialog)}
-                disabled={busy}
-                className="flex-1 rounded-lg bg-emerald-600 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
-              >
-                Confirm Payment
-              </button>
-              <button
-                onClick={() => setPayDialog(null)}
-                className="rounded-lg border border-input px-4 py-2.5 text-sm font-semibold"
-              >
-                Cancel
-              </button>
-            </div>
+            <button
+              onClick={() => payNow(payDialog)}
+              disabled={busy}
+              className="w-full rounded-xl bg-emerald-600 py-3 text-sm font-bold text-white shadow hover:bg-emerald-700"
+            >
+              Confirm ₹{payDialog.amount?.toFixed(2)} Paid
+            </button>
           </div>
         </div>
       )}
@@ -623,43 +632,18 @@ function DriverBookings() {
   );
 }
 
-function Timeline({ b }: { b: Booking }) {
-  const isEntered = b.status === "active" || b.status === "completed";
-  const isExited = b.status === "completed";
-  const isPaid = b.payment_status === "paid";
-
-  const steps = [
-    { label: "Booking Confirmed", done: true },
-    { label: "Reserved Slot", done: true },
-    { label: "Entry Approved", done: isEntered },
-    { label: "Parking Active", done: isEntered },
-    { label: "Exit Requested", done: b.exit_requested || isExited },
-    { label: "Exit Approved", done: isExited },
-    { label: "Payment Completed", done: isPaid },
-    { label: "Booking Closed", done: isExited && isPaid },
-  ];
-
+function StatusBadge({ status }: { status: Booking["status"] }) {
+  const map: Record<Booking["status"], { label: string; tone: string }> = {
+    reserved: { label: "Reserved", tone: "bg-amber-500/15 text-amber-700 dark:text-amber-500" },
+    active: { label: "Parking Active", tone: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400" },
+    completed: { label: "Completed", tone: "bg-blue-500/15 text-blue-700 dark:text-blue-400" },
+    cancelled: { label: "Cancelled", tone: "bg-destructive/15 text-destructive" },
+  };
+  const b = map[status] ?? { label: status, tone: "bg-muted text-muted-foreground" };
   return (
-    <div className="mt-4 rounded-lg bg-muted/50 p-4">
-      <div className="mb-3 text-xs font-semibold uppercase text-muted-foreground">Status Timeline</div>
-      <ol className="flex flex-wrap items-center gap-2 text-xs">
-        {steps.map((s, i) => (
-          <li key={s.label} className="flex items-center gap-2">
-            <span
-              className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold ${
-                s.done
-                  ? "bg-emerald-500 text-white"
-                  : "bg-background text-muted-foreground ring-1 ring-border"
-              }`}
-            >
-              {i + 1}
-            </span>
-            <span className={s.done ? "font-medium" : "text-muted-foreground"}>{s.label}</span>
-            {i < steps.length - 1 && <span className="mx-1 text-muted-foreground">→</span>}
-          </li>
-        ))}
-      </ol>
-    </div>
+    <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase ${b.tone}`}>
+      {b.label}
+    </span>
   );
 }
 
@@ -672,16 +656,29 @@ function Info({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, string> = {
-    reserved: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
-    active: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
-    completed: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
-    cancelled: "bg-red-500/15 text-red-700 dark:text-red-400",
-  };
+function Timeline({ b }: { b: Booking }) {
+  const steps = [
+    { label: "Booked", done: true },
+    { label: "Entered", done: !!b.entry_time || b.status === "active" || b.status === "completed" },
+    { label: "Exited", done: !!b.exit_time || b.status === "completed" },
+    { label: "Paid", done: b.payment_status === "paid" },
+  ];
   return (
-    <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${map[status]}`}>
-      {status}
-    </span>
+    <div className="mt-4 flex items-center justify-between border-t border-border pt-4">
+      {steps.map((s, i) => (
+        <div key={s.label} className="flex items-center gap-2">
+          <div
+            className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold ${
+              s.done ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+            }`}
+          >
+            {s.done ? "✓" : i + 1}
+          </div>
+          <span className={`text-xs ${s.done ? "font-semibold text-foreground" : "text-muted-foreground"}`}>
+            {s.label}
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }

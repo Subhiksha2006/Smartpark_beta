@@ -2,34 +2,39 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import type { Slot } from "@/components/SlotGrid";
 import { getDemoRole } from "@/lib/demo-auth";
-
-const MOCK_SLOTS: Slot[] = [
-  { id: "slot-a1", code: "A1", status: "available" },
-  { id: "slot-a2", code: "A2", status: "available" },
-  { id: "slot-a3", code: "A3", status: "occupied" },
-  { id: "slot-a4", code: "A4", status: "reserved" },
-  { id: "slot-b1", code: "B1", status: "available" },
-  { id: "slot-b2", code: "B2", status: "available" },
-  { id: "slot-b3", code: "B3", status: "occupied" },
-  { id: "slot-b4", code: "B4", status: "available" },
-  { id: "slot-c1", code: "C1", status: "available" },
-  { id: "slot-c2", code: "C2", status: "reserved" },
-  { id: "slot-c3", code: "C3", status: "available" },
-  { id: "slot-c4", code: "C4", status: "available" },
-];
+import { getDemoState } from "@/lib/demo-state-store";
 
 export function useSlots() {
-  const [slots, setSlots] = useState<Slot[]>(MOCK_SLOTS);
-  const [loading, setLoading] = useState(true);
+  const isDemo = typeof window !== "undefined" ? (getDemoRole() !== null || true) : true;
+  const [slots, setSlots] = useState<Slot[]>(() => {
+    const demoState = getDemoState();
+    return demoState.slots.map((s) => ({
+      id: s.id,
+      code: s.code,
+      status: s.status,
+    }));
+  });
+  const [loading, setLoading] = useState(false);
 
-  // Listen for hardware serial ultrasonic sensor updates (A1 & A2)
+  // Synchronize slot status on demo state changes and hardware sensor events
   useEffect(() => {
+    function handleSync() {
+      const demoState = getDemoState();
+      setSlots(
+        demoState.slots.map((s) => ({
+          id: s.id,
+          code: s.code,
+          status: s.status,
+        }))
+      );
+    }
+
     function handleHardwareEvent(e: Event) {
-      const detail = (e as CustomEvent).detail as { slotCode: string; status: "occupied" | "available" };
+      const detail = (e as CustomEvent).detail as { slotCode: string; status: "occupied" | "available" | "reserved" };
       if (!detail?.slotCode) return;
       setSlots((prev) =>
         prev.map((s) =>
-          s.code.toUpperCase().replace(/[^A-Z0-9]/g, "") === detail.slotCode
+          s.code.toUpperCase().replace(/[^A-Z0-9]/g, "") === detail.slotCode.toUpperCase().replace(/[^A-Z0-9]/g, "")
             ? { ...s, status: detail.status }
             : s
         )
@@ -38,10 +43,14 @@ export function useSlots() {
 
     if (typeof window !== "undefined") {
       window.addEventListener("smartpark:slot-sensor", handleHardwareEvent);
+      window.addEventListener("smartpark:demo-state-update", handleSync);
+      window.addEventListener("storage", handleSync);
     }
     return () => {
       if (typeof window !== "undefined") {
         window.removeEventListener("smartpark:slot-sensor", handleHardwareEvent);
+        window.removeEventListener("smartpark:demo-state-update", handleSync);
+        window.removeEventListener("storage", handleSync);
       }
     };
   }, []);
@@ -49,6 +58,14 @@ export function useSlots() {
   useEffect(() => {
     let mounted = true;
     if (getDemoRole()) {
+      const demoState = getDemoState();
+      setSlots(
+        demoState.slots.map((s) => ({
+          id: s.id,
+          code: s.code,
+          status: s.status,
+        }))
+      );
       setLoading(false);
       return;
     }
@@ -78,7 +95,7 @@ export function useSlots() {
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "parking_slots" },
-        () => load(),
+        () => load()
       )
       .subscribe();
     return () => {

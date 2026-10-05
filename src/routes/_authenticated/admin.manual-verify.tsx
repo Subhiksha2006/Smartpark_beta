@@ -199,7 +199,7 @@ function ManualVerify() {
         exit_time: exit.toISOString(),
         duration_minutes: minutes,
         amount: total,
-        payment_status: "Paid",
+        payment_status: "paid",
       });
 
       triggerGate(b.booking_code, "EXIT").catch(() => {});
@@ -214,7 +214,7 @@ function ManualVerify() {
           exit_time: exit.toISOString(),
           duration_minutes: minutes,
           amount: total,
-          payment_status: "Paid",
+          payment_status: "paid",
           slot: b.parking_slots?.code || "A1",
           driver_name: b.profiles?.full_name || "Demo Driver",
         });

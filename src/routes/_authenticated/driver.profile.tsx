@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useCurrentUser } from "@/lib/use-role";
 import { toast } from "sonner";
 import { getDemoRole } from "@/lib/demo-auth";
+import { useDemoState, updateDemoProfile } from "@/lib/demo-state-store";
 
 export const Route = createFileRoute("/_authenticated/driver/profile")({
   component: () => (
@@ -25,48 +26,57 @@ const NAV = [
 
 function DriverProfile() {
   const { userId } = useCurrentUser();
-  const [fullName, setFullName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [vehicle, setVehicle] = useState("");
+  const { driverProfile } = useDemoState();
+  const [fullName, setFullName] = useState(driverProfile.full_name);
+  const [email, setEmail] = useState(driverProfile.email);
+  const [phone, setPhone] = useState(driverProfile.phone);
+  const [vehicle, setVehicle] = useState(driverProfile.vehicle_number);
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!userId) return;
     if (getDemoRole()) {
-      setFullName("Demo Driver");
-      setPhone("+91 98765 43210");
-      setVehicle("TN01S1234");
+      setFullName(driverProfile.full_name);
+      setEmail(driverProfile.email);
+      setPhone(driverProfile.phone);
+      setVehicle(driverProfile.vehicle_number);
       return;
     }
     supabase
       .from("profiles")
-      .select("full_name, phone, vehicle_number")
+      .select("full_name, phone, vehicle_number, email")
       .eq("id", userId)
       .maybeSingle()
       .then(({ data, error }) => {
         if (data && !error) {
-          const d = data as { full_name: string; phone: string | null; vehicle_number: string | null };
+          const d = data as { full_name: string; phone: string | null; vehicle_number: string | null; email: string };
           setFullName(d.full_name);
+          setEmail(d.email);
           setPhone(d.phone ?? "");
           setVehicle(d.vehicle_number ?? "");
-        } else {
-          setFullName("Demo Driver");
-          setPhone("+91 98765 43210");
-          setVehicle("TN01S1234");
         }
       });
-  }, [userId]);
+  }, [userId, driverProfile]);
 
   async function save() {
-    if (!userId) return;
     setSaving(true);
     if (getDemoRole()) {
+      updateDemoProfile({
+        full_name: fullName,
+        email,
+        phone,
+        vehicle_number: vehicle,
+      });
       setTimeout(() => {
         setSaving(false);
         setPassword("");
-        toast.success("Profile updated");
-      }, 400);
+        toast.success("Profile updated in Demo System");
+      }, 300);
+      return;
+    }
+    if (!userId) {
+      setSaving(false);
       return;
     }
     try {
@@ -94,8 +104,9 @@ function DriverProfile() {
       <h2 className="mb-4 text-2xl font-bold">Profile</h2>
       <div className="max-w-xl space-y-4 rounded-2xl border border-border bg-card p-6 shadow-sm">
         <Field label="Full Name" value={fullName} onChange={setFullName} />
-        <Field label="Phone" value={phone} onChange={setPhone} />
-        <Field label="Vehicle Number" value={vehicle} onChange={setVehicle} />
+        <Field label="Email Address" value={email} onChange={setEmail} type="email" />
+        <Field label="Phone Number" value={phone} onChange={setPhone} />
+        <Field label="Default Vehicle Number" value={vehicle} onChange={setVehicle} />
         <Field label="New Password (optional)" type="password" value={password} onChange={setPassword} />
         <button
           onClick={save}

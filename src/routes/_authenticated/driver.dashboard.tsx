@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { getDemoRole } from "@/lib/demo-auth";
+import { createDemoBooking, useDemoState } from "@/lib/demo-state-store";
 
 export const Route = createFileRoute("/_authenticated/driver/dashboard")({
   component: () => (
@@ -29,8 +30,9 @@ const NAV = [
 function DriverDashboard() {
   const { slots } = useSlots();
   const { userId } = useCurrentUser();
-  const [profileName, setProfileName] = useState<string>("");
-  const [vehicle, setVehicle] = useState("");
+  const { driverProfile } = useDemoState();
+  const [profileName, setProfileName] = useState<string>(driverProfile.full_name || "Demo Driver");
+  const [vehicle, setVehicle] = useState(driverProfile.vehicle_number || "TN01S1234");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [duration, setDuration] = useState<number>(1);
   const [booking, setBooking] = useState(false);
@@ -38,8 +40,8 @@ function DriverDashboard() {
   useEffect(() => {
     if (!userId) return;
     if (getDemoRole()) {
-      setProfileName("Demo Driver");
-      setVehicle("TN01S1234");
+      setProfileName(driverProfile.full_name);
+      setVehicle(driverProfile.vehicle_number);
       return;
     }
     supabase
@@ -56,7 +58,7 @@ function DriverDashboard() {
           setVehicle("TN01S1234");
         }
       });
-  }, [userId]);
+  }, [userId, driverProfile]);
 
   const counts = {
     available: slots.filter((s) => s.status === "available").length,
@@ -65,17 +67,40 @@ function DriverDashboard() {
   };
 
   async function bookSlot() {
-    if (!selectedId || !userId || !vehicle) {
+    if (!selectedId || !vehicle) {
       toast.error("Select a slot and enter vehicle number");
       return;
     }
     setBooking(true);
+
+    const slot = slots.find((s) => s.id === selectedId);
+    if (!slot) {
+      toast.error("Please select a slot");
+      setBooking(false);
+      return;
+    }
+
     if (getDemoRole()) {
-      setTimeout(() => {
-        setBooking(false);
+      try {
+        const newBooking = createDemoBooking({
+          slotCode: slot.code as "A1" | "A2",
+          vehicleNumber: vehicle,
+          durationHours: duration,
+          driverName: profileName || "Demo Driver",
+        });
         setSelectedId(null);
-        toast.success("Booking confirmed!");
-      }, 400);
+        toast.success(`Slot ${slot.code} booked successfully! Booking: ${newBooking.booking_code}`);
+      } catch (err: any) {
+        toast.error(err?.message || "Booking failed.");
+      } finally {
+        setBooking(false);
+      }
+      return;
+    }
+
+    if (!userId) {
+      toast.error("Please sign in to complete booking");
+      setBooking(false);
       return;
     }
 
@@ -133,7 +158,7 @@ function DriverDashboard() {
               <input
                 readOnly
                 value={slots.find((s) => s.id === selectedId)?.code ?? "—"}
-                className="w-full rounded-lg border border-input bg-muted px-3 py-2 text-sm"
+                className="w-full rounded-lg border border-input bg-muted px-3 py-2 text-sm font-semibold"
               />
             </div>
             <div>

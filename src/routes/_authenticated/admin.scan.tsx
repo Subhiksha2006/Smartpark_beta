@@ -699,7 +699,7 @@ function ScanPage() {
             exit_time: exitStr,
             duration_minutes: durationMinutes,
             amount: pricing.total,
-            payment_status: "Paid",
+            payment_status: "paid",
           });
 
           triggerGate(updatedDemo.booking_code, "EXIT").catch(() => {});
@@ -713,7 +713,7 @@ function ScanPage() {
               exit_time: exitStr,
               duration_minutes: durationMinutes,
               amount: pricing.total,
-              payment_status: "Paid",
+              payment_status: "paid",
               slot: updatedDemo.slot_code,
               driver_name: updatedDemo.driver_name,
             });

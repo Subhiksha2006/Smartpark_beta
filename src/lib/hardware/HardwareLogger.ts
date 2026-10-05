@@ -9,7 +9,8 @@ export type HardwareLogType =
   | "Slot A2 Free"
   | "Manual Entry Approved"
   | "Manual Exit Approved"
-  | "Invoice Generated";
+  | "Invoice Generated"
+  | "Demo State Reset";
 
 export interface HardwareLogEntry {
   id: string;
